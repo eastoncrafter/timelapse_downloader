@@ -14,6 +14,13 @@ import asyncio
 import re
 import shutil
 import sys
+import hashlib
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaFileUpload
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 
 def check_ffmpeg_dependencies():
     """Check if ffmpeg and ffprobe are available in the system PATH."""
@@ -143,6 +150,186 @@ async def try_telegram_upload(config, file_path, caption=None):
         print(f'Failed to upload to Telegram: {e}')
         return False
 
+def get_file_hash(file_path):
+    """Generate MD5 hash of file for duplicate detection."""
+    hash_md5 = hashlib.md5()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
+
+def load_uploaded_videos_log(log_file):
+    """Load the log of previously uploaded videos."""
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            print(f"Warning: Could not read uploaded videos log: {log_file}")
+    return {}
+
+def save_uploaded_videos_log(log_file, log_data):
+    """Save the log of uploaded videos."""
+    try:
+        with open(log_file, 'w') as f:
+            json.dump(log_data, f, indent=2)
+    except IOError as e:
+        print(f"Warning: Could not save uploaded videos log: {e}")
+
+def get_youtube_service(config):
+    """Get authenticated YouTube service object."""
+    secrets_file = config.get('youtube_client_secrets_file', 'client_secrets.json')
+    credentials_file = config.get('youtube_credentials_file', 'youtube_credentials.json')
+    
+    if not os.path.exists(secrets_file):
+        print(f"YouTube upload skipped: Client secrets file not found: {secrets_file}")
+        print("Please download your OAuth 2.0 credentials from Google Cloud Console")
+        return None
+    
+    SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
+    creds = None
+    
+    # Load existing credentials
+    if os.path.exists(credentials_file):
+        try:
+            creds = Credentials.from_authorized_user_file(credentials_file, SCOPES)
+        except Exception as e:
+            print(f"Warning: Could not load existing credentials: {e}")
+    
+    # If there are no (valid) credentials available, let the user log in
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                print(f"Warning: Could not refresh credentials: {e}")
+                creds = None
+        
+        if not creds:
+            try:
+                flow = InstalledAppFlow.from_client_secrets_file(secrets_file, SCOPES)
+                creds = flow.run_local_server(port=0)
+            except Exception as e:
+                print(f"YouTube upload skipped: Authentication failed: {e}")
+                return None
+        
+        # Save the credentials for the next run
+        try:
+            with open(credentials_file, 'w') as token:
+                token.write(creds.to_json())
+        except Exception as e:
+            print(f"Warning: Could not save credentials: {e}")
+    
+    try:
+        return build('youtube', 'v3', credentials=creds)
+    except Exception as e:
+        print(f"YouTube upload skipped: Could not build YouTube service: {e}")
+        return None
+
+def is_video_already_uploaded(file_path, config):
+    """Check if video has already been uploaded to YouTube."""
+    log_file = config.get('uploaded_videos_log', 'uploaded_videos.json')
+    uploaded_videos = load_uploaded_videos_log(log_file)
+    
+    file_hash = get_file_hash(file_path)
+    filename = os.path.basename(file_path)
+    
+    # Check by hash (most reliable)
+    if file_hash in uploaded_videos:
+        print(f"Video already uploaded (by hash): {filename}")
+        return True
+    
+    # Check by filename (less reliable but useful)
+    for video_hash, video_info in uploaded_videos.items():
+        if video_info.get('filename') == filename:
+            print(f"Video already uploaded (by filename): {filename}")
+            return True
+    
+    return False
+
+async def try_youtube_upload(config, file_path, title=None, description=None):
+    """Upload video to YouTube if not already uploaded."""
+    if not config.get('youtube_client_secrets_file'):
+        print("YouTube upload skipped: Missing configuration")
+        return False
+    
+    # Validate file exists and is not empty
+    if not os.path.exists(file_path):
+        print(f"Error: File not found - {file_path}")
+        return False
+    
+    if os.path.getsize(file_path) == 0:
+        print(f"Error: File is empty - {file_path}")
+        return False
+    
+    # Check if already uploaded
+    if is_video_already_uploaded(file_path, config):
+        return True  # Return success since it's already uploaded
+    
+    # Get YouTube service
+    youtube = get_youtube_service(config)
+    if not youtube:
+        return False
+    
+    # Prepare video metadata
+    filename = os.path.basename(file_path)
+    video_title = title or f"Timelapse: {filename}"
+    video_description = description or f"Automated upload of timelapse video: {filename}"
+    
+    # Set video privacy (can be made configurable)
+    privacy_status = config.get('youtube_privacy_status', 'unlisted')  # 'public', 'unlisted', 'private'
+    
+    body = {
+        'snippet': {
+            'title': video_title,
+            'description': video_description,
+            'tags': ['timelapse', '3d printing', 'bambu'],
+            'categoryId': '28'  # Science & Technology
+        },
+        'status': {
+            'privacyStatus': privacy_status
+        }
+    }
+    
+    try:
+        # Upload the video
+        print(f"Uploading to YouTube: {filename}")
+        media = MediaFileUpload(file_path, chunksize=-1, resumable=True)
+        request = youtube.videos().insert(
+            part=','.join(body.keys()),
+            body=body,
+            media_body=media
+        )
+        
+        response = request.execute()
+        video_id = response['id']
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        print(f'Successfully uploaded to YouTube: {video_url}')
+        
+        # Log the successful upload
+        log_file = config.get('uploaded_videos_log', 'uploaded_videos.json')
+        uploaded_videos = load_uploaded_videos_log(log_file)
+        file_hash = get_file_hash(file_path)
+        
+        uploaded_videos[file_hash] = {
+            'filename': filename,
+            'youtube_id': video_id,
+            'upload_date': datetime.now().isoformat(),
+            'title': video_title,
+            'url': video_url
+        }
+        
+        save_uploaded_videos_log(log_file, uploaded_videos)
+        return True
+        
+    except HttpError as e:
+        print(f'Failed to upload to YouTube: HTTP error {e.resp.status}: {e.content}')
+        return False
+    except Exception as e:
+        print(f'Failed to upload to YouTube: {e}')
+        return False
+
 def main():
     parser = argparse.ArgumentParser(description="Download timelapse videos via FTP.")
     group = parser.add_mutually_exclusive_group()
@@ -156,6 +343,8 @@ def main():
     parser.add_argument('--keep-after-upload', action='store_true', help='Keep streamable file after Telegram upload (default: delete after upload)')
     parser.add_argument('--no-gpu', action='store_true', help='Force CPU-only processing (no NVIDIA GPU required)')
     parser.add_argument('--speed', type=float, default=0.3, help='Adjust video speed (e.g., 0.5 for half speed, 2.0 for double speed). Default is 0.3 (slower speed).')
+    parser.add_argument('--youtube-upload', action='store_true', help='Upload videos to YouTube (requires OAuth setup)')
+    parser.add_argument('--youtube-title-prefix', default='Timelapse', help='Prefix for YouTube video titles (default: Timelapse)')
     parser.add_argument('--test', action='store_true', help='Run test mode: process and upload test_video.avi')
     args = parser.parse_args()
 
@@ -212,15 +401,31 @@ def main():
             subprocess.run(ffmpeg_cmd, check=True)
             print(f'Created streamable video at {streamable_filename} (speed: {args.speed}x)')
             
-            # Attempt Telegram upload
+            # Attempt uploads
             caption = f'Test Video: {os.path.basename(test_video)} (Speed: {args.speed}x)'
             tg_success = asyncio.run(try_telegram_upload(config, streamable_filename, caption=caption))
+            
+            youtube_success = False
+            if args.youtube_upload:
+                title = f"{args.youtube_title_prefix}: {caption}"
+                description = f"Test upload of 3D printing timelapse video: {caption}"
+                youtube_success = asyncio.run(try_youtube_upload(config, streamable_filename, title=title, description=description))
             
             # Clean up
             if os.path.exists(streamable_filename):
                 os.remove(streamable_filename)
             
-            sys.exit(0 if tg_success else 1)
+            # Exit with success if any upload succeeded
+            upload_success = tg_success or youtube_success
+            if upload_success:
+                upload_methods = []
+                if tg_success:
+                    upload_methods.append("Telegram")
+                if youtube_success:
+                    upload_methods.append("YouTube")
+                print(f'Test completed successfully - uploaded to: {", ".join(upload_methods)}')
+            
+            sys.exit(0 if upload_success else 1)
         
         except subprocess.CalledProcessError as e:
             print(f'Test mode failed: {e}')
@@ -405,16 +610,32 @@ def main():
                         print(f'Unexpected error during streamable creation: {e}')
                         streamable_filename = None
 
-                # Attempt Telegram upload
+                # Attempt uploads
+                telegram_success = False
+                youtube_success = False
+                
                 if upload_filename:
                     caption = extract_datetime_from_filename(os.path.basename(local_filename))
+                    
+                    # Try Telegram upload
                     try:
-                        upload_success = await try_telegram_upload(config, upload_filename, caption=caption)
+                        telegram_success = await try_telegram_upload(config, upload_filename, caption=caption)
                     except Exception as e:
                         print(f"Error during Telegram upload: {e}")
-                        upload_success = False
+                        telegram_success = False
                     
-                    # Clean up files after successful upload
+                    # Try YouTube upload if enabled
+                    if args.youtube_upload:
+                        try:
+                            title = f"{args.youtube_title_prefix}: {caption}" if caption else f"{args.youtube_title_prefix}: {os.path.basename(local_filename)}"
+                            description = f"3D printing timelapse video from {caption}" if caption else "3D printing timelapse video"
+                            youtube_success = await try_youtube_upload(config, upload_filename, title=title, description=description)
+                        except Exception as e:
+                            print(f"Error during YouTube upload: {e}")
+                            youtube_success = False
+                    
+                    # Clean up files after successful upload(s)
+                    upload_success = telegram_success or youtube_success
                     if upload_success:
                         if not args.keep_after_upload:
                             try:
@@ -424,7 +645,13 @@ def main():
                                     os.remove(local_filename)
                             except Exception as e:
                                 print(f"Error during cleanup: {e}")
-                        print(f'Uploaded and cleaned up: {upload_filename}')
+                        
+                        upload_methods = []
+                        if telegram_success:
+                            upload_methods.append("Telegram")
+                        if youtube_success:
+                            upload_methods.append("YouTube")
+                        print(f'Uploaded to {", ".join(upload_methods)} and cleaned up: {upload_filename}')
 
             if total_pbar:
                 total_pbar.close()

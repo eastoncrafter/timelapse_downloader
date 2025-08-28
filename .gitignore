@@ -1,1 +1,5 @@
 config.json
+client_secrets.json
+youtube_credentials.json
+uploaded_videos.json
+timelapse/

@@ -86,6 +86,12 @@ python get_timelapse.py [options]
 - `--no-gpu`  
   Force CPU-only processing for video conversion (useful if you do not have an NVIDIA GPU; uses libx265 instead of hevc_nvenc).
 
+- `--youtube-upload`  
+  Upload videos to YouTube (requires OAuth setup and `client_secrets.json`).
+
+- `--youtube-title-prefix <prefix>`  
+  Prefix for YouTube video titles (default: "Timelapse").
+
 ### Example Commands
 
 Download the latest timelapse and make it streamable (default):
@@ -156,6 +162,60 @@ If you want each streamable video to be uploaded automatically to a Telegram cha
 If both fields are present, every converted (streamable) video will be uploaded to your Telegram channel automatically after processing.
 
 If not set, Telegram upload is skipped.
+
+---
+
+## YouTube Upload (Optional)
+
+You can automatically upload timelapse videos to YouTube using the `--youtube-upload` flag. This feature prevents duplicate uploads by tracking previously uploaded videos.
+
+### Setup
+
+1. **Create a Google Cloud Project:**
+   - Go to the [Google Cloud Console](https://console.cloud.google.com/)
+   - Create a new project or select an existing one
+   - Enable the YouTube Data API v3
+
+2. **Create OAuth 2.0 Credentials:**
+   - Go to "APIs & Services" > "Credentials"
+   - Click "Create Credentials" > "OAuth 2.0 Client IDs"
+   - Choose "Desktop application" as the application type
+   - Download the JSON file and save it as `client_secrets.json` in the script directory
+
+3. **Configure YouTube settings in `config.json`:**
+   ```json
+   {
+     "youtube_client_secrets_file": "client_secrets.json",
+     "youtube_credentials_file": "youtube_credentials.json",
+     "youtube_privacy_status": "unlisted",
+     "uploaded_videos_log": "uploaded_videos.json"
+   }
+   ```
+
+### Usage
+
+Upload to YouTube with default settings (unlisted videos):
+```bash
+python get_timelapse.py --youtube-upload
+```
+
+Upload to YouTube with custom title prefix:
+```bash
+python get_timelapse.py --youtube-upload --youtube-title-prefix "My 3D Prints"
+```
+
+Upload to both Telegram and YouTube:
+```bash
+python get_timelapse.py --youtube-upload
+```
+
+### First Time Authentication
+
+The first time you run with `--youtube-upload`, a browser window will open asking you to authorize the application. After authorization, credentials will be saved for future use.
+
+### Duplicate Prevention
+
+The script maintains a log of uploaded videos (`uploaded_videos.json`) using file hashes to prevent duplicate uploads. If a video has already been uploaded to YouTube, it will be skipped.
 
 ---
 
