@@ -14,7 +14,6 @@ import asyncio
 import re
 import shutil
 import sys
-import hashlib
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
@@ -150,31 +149,68 @@ async def try_telegram_upload(config, file_path, caption=None):
         print(f'Failed to upload to Telegram: {e}')
         return False
 
-def get_file_hash(file_path):
-    """Generate MD5 hash of file for duplicate detection."""
-    hash_md5 = hashlib.md5()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
-
-def load_uploaded_videos_log(log_file):
-    """Load the log of previously uploaded videos."""
-    if os.path.exists(log_file):
-        try:
-            with open(log_file, 'r') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            print(f"Warning: Could not read uploaded videos log: {log_file}")
-    return {}
-
-def save_uploaded_videos_log(log_file, log_data):
-    """Save the log of uploaded videos."""
+def get_channel_videos(youtube_service, max_results=50):
+    """Fetch videos from the authenticated user's YouTube channel."""
     try:
-        with open(log_file, 'w') as f:
-            json.dump(log_data, f, indent=2)
-    except IOError as e:
-        print(f"Warning: Could not save uploaded videos log: {e}")
+        # Get the authenticated user's channel
+        channels_response = youtube_service.channels().list(
+            part='contentDetails',
+            mine=True
+        ).execute()
+        
+        if not channels_response['items']:
+            print("No channel found for authenticated user")
+            return []
+        
+        # Get the uploads playlist ID
+        uploads_playlist_id = channels_response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+        
+        # Get videos from the uploads playlist
+        videos = []
+        next_page_token = None
+        
+        while len(videos) < max_results:
+            playlist_response = youtube_service.playlistItems().list(
+                part='snippet',
+                playlistId=uploads_playlist_id,
+                maxResults=min(50, max_results - len(videos)),
+                pageToken=next_page_token
+            ).execute()
+            
+            for item in playlist_response['items']:
+                videos.append({
+                    'title': item['snippet']['title'],
+                    'video_id': item['snippet']['resourceId']['videoId'],
+                    'published_at': item['snippet']['publishedAt']
+                })
+            
+            next_page_token = playlist_response.get('nextPageToken')
+            if not next_page_token:
+                break
+        
+        return videos
+        
+    except Exception as e:
+        print(f"Warning: Could not fetch channel videos: {e}")
+        return []
+
+def is_video_already_uploaded_by_title(youtube_service, video_title):
+    """Check if a video with the same or similar title already exists on the channel."""
+    try:
+        channel_videos = get_channel_videos(youtube_service)
+        
+        for video in channel_videos:
+            existing_title = video['title']
+            # Check for exact title match or if the new title is contained in existing title
+            if video_title == existing_title or video_title in existing_title:
+                print(f"Video already uploaded with title: {existing_title}")
+                return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"Warning: Could not check for duplicate videos: {e}")
+        return False  # If we can't check, allow the upload to proceed
 
 def get_youtube_service(config):
     """Get authenticated YouTube service object."""
@@ -226,26 +262,12 @@ def get_youtube_service(config):
         print(f"YouTube upload skipped: Could not build YouTube service: {e}")
         return None
 
-def is_video_already_uploaded(file_path, config):
-    """Check if video has already been uploaded to YouTube."""
-    log_file = config.get('uploaded_videos_log', 'uploaded_videos.json')
-    uploaded_videos = load_uploaded_videos_log(log_file)
+def is_video_already_uploaded(youtube_service, video_title):
+    """Check if video has already been uploaded to YouTube by checking channel videos."""
+    if not youtube_service:
+        return False
     
-    file_hash = get_file_hash(file_path)
-    filename = os.path.basename(file_path)
-    
-    # Check by hash (most reliable)
-    if file_hash in uploaded_videos:
-        print(f"Video already uploaded (by hash): {filename}")
-        return True
-    
-    # Check by filename (less reliable but useful)
-    for video_hash, video_info in uploaded_videos.items():
-        if video_info.get('filename') == filename:
-            print(f"Video already uploaded (by filename): {filename}")
-            return True
-    
-    return False
+    return is_video_already_uploaded_by_title(youtube_service, video_title)
 
 async def try_youtube_upload(config, file_path, title=None, description=None):
     """Upload video to YouTube if not already uploaded."""
@@ -262,10 +284,6 @@ async def try_youtube_upload(config, file_path, title=None, description=None):
         print(f"Error: File is empty - {file_path}")
         return False
     
-    # Check if already uploaded
-    if is_video_already_uploaded(file_path, config):
-        return True  # Return success since it's already uploaded
-    
     # Get YouTube service
     youtube = get_youtube_service(config)
     if not youtube:
@@ -275,6 +293,10 @@ async def try_youtube_upload(config, file_path, title=None, description=None):
     filename = os.path.basename(file_path)
     video_title = title or f"Timelapse: {filename}"
     video_description = description or f"Automated upload of timelapse video: {filename}"
+    
+    # Check if already uploaded by checking channel videos
+    if is_video_already_uploaded(youtube, video_title):
+        return True  # Return success since it's already uploaded
     
     # Set video privacy (can be made configurable)
     privacy_status = config.get('youtube_privacy_status', 'unlisted')  # 'public', 'unlisted', 'private'
@@ -306,21 +328,6 @@ async def try_youtube_upload(config, file_path, title=None, description=None):
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         
         print(f'Successfully uploaded to YouTube: {video_url}')
-        
-        # Log the successful upload
-        log_file = config.get('uploaded_videos_log', 'uploaded_videos.json')
-        uploaded_videos = load_uploaded_videos_log(log_file)
-        file_hash = get_file_hash(file_path)
-        
-        uploaded_videos[file_hash] = {
-            'filename': filename,
-            'youtube_id': video_id,
-            'upload_date': datetime.now().isoformat(),
-            'title': video_title,
-            'url': video_url
-        }
-        
-        save_uploaded_videos_log(log_file, uploaded_videos)
         return True
         
     except HttpError as e:

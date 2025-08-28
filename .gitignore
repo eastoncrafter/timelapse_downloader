@@ -1,7 +1,6 @@
 config.json
 client_secrets.json
 youtube_credentials.json
-uploaded_videos.json
 timelapse/
 __pycache__/
 *.pyc
