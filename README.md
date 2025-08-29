@@ -36,6 +36,11 @@ Install Python dependencies with pip:
 pip install -r requirements.txt
 ```
 
+For YouTube upload functionality, also install YouTube dependencies:
+```bash
+pip install -r requirements-youtube.txt
+```
+
 You also need ffmpeg with NVIDIA GPU support (see [ffmpeg docs](https://ffmpeg.org/)).
 
 ---
@@ -89,8 +94,17 @@ python get_timelapse.py [options]
 - `--youtube-upload`  
   Upload videos to YouTube (requires OAuth setup and `client_secrets.json`).
 
+- `--youtube-auth`  
+  Setup YouTube OAuth authentication (run this first before using --youtube-upload).
+
 - `--youtube-title-prefix <prefix>`  
   Prefix for YouTube video titles (default: "Timelapse").
+
+- `--youtube-playlist-id <id>`  
+  YouTube playlist ID to add uploaded videos to automatically.
+
+- `--keep-after-upload`  
+  Keep files after upload (default: delete after upload).
 
 ### Example Commands
 
@@ -167,41 +181,52 @@ If not set, Telegram upload is skipped.
 
 ## YouTube Upload (Optional)
 
-You can automatically upload timelapse videos to YouTube using the `--youtube-upload` flag. This feature prevents duplicate uploads by tracking previously uploaded videos.
+You can automatically upload timelapse videos to YouTube using the `--youtube-upload` flag. This feature prevents duplicate uploads by checking existing videos on your YouTube channel by title.
 
-### Setup
+### YouTube Setup
 
-1. **Create a Google Cloud Project:**
-   - Go to the [Google Cloud Console](https://console.cloud.google.com/)
-   - Create a new project or select an existing one
-   - Enable the YouTube Data API v3
+See [YOUTUBE_SETUP.md](YOUTUBE_SETUP.md) for detailed setup instructions.
 
-2. **Create OAuth 2.0 Credentials:**
-   - Go to "APIs & Services" > "Credentials"
-   - Click "Create Credentials" > "OAuth 2.0 Client IDs"
-   - Choose "Desktop application" as the application type
-   - Download the JSON file and save it as `client_secrets.json` in the script directory
+**Quick Setup:**
+1. Install YouTube dependencies: `pip install -r requirements-youtube.txt`
+2. Set up Google Cloud Console credentials (see setup guide)
+3. Run authentication: `python get_timelapse.py --youtube-auth`
+4. Configure settings in `config.json`
 
-3. **Configure YouTube settings in `config.json`:**
-   ```json
-   {
-     "youtube_client_secrets_file": "client_secrets.json",
-     "youtube_credentials_file": "youtube_credentials.json",
-     "youtube_privacy_status": "unlisted",
-     "uploaded_videos_log": "uploaded_videos.json"
-   }
-   ```
+### YouTube Configuration
 
-### Usage
+Add YouTube settings to your `config.json`:
+```json
+{
+    "youtube_client_secrets_file": "client_secrets.json",
+    "youtube_credentials_file": "youtube_credentials.json", 
+    "youtube_privacy_status": "unlisted",
+    "youtube_playlist_id": "PLxxxxxxxxxxxxxxxxxxxxx"
+}
+```
 
-Upload to YouTube with default settings (unlisted videos):
+**Note:** `client_secrets.json` contains your app credentials from Google Cloud Console, while `youtube_credentials.json` contains your user authentication tokens (generated automatically).
+
+### YouTube Usage Examples
+
+Set up authentication (run once):
+```bash
+python get_timelapse.py --youtube-auth
+```
+
+Upload to YouTube with default settings:
 ```bash
 python get_timelapse.py --youtube-upload
 ```
 
-Upload to YouTube with custom title prefix:
+Upload with custom title prefix:
 ```bash
 python get_timelapse.py --youtube-upload --youtube-title-prefix "My 3D Prints"
+```
+
+Upload to specific playlist:
+```bash
+python get_timelapse.py --youtube-upload --youtube-playlist-id "PLxxxxxxxxxxxxxxxxxxxxx"
 ```
 
 Upload to both Telegram and YouTube:
@@ -209,13 +234,14 @@ Upload to both Telegram and YouTube:
 python get_timelapse.py --youtube-upload
 ```
 
-### First Time Authentication
+Keep local files after upload:
+```bash
+python get_timelapse.py --youtube-upload --keep-after-upload
+```
 
-The first time you run with `--youtube-upload`, a browser window will open asking you to authorize the application. After authorization, credentials will be saved for future use.
+### Duplicate Detection
 
-### Duplicate Prevention
-
-The script maintains a log of uploaded videos (`uploaded_videos.json`) using file hashes to prevent duplicate uploads. If a video has already been uploaded to YouTube, it will be skipped.
+The system automatically prevents duplicate uploads by checking your YouTube channel for existing videos with matching titles. No local file tracking is needed - it works directly with the YouTube API.
 
 ---
 

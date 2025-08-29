@@ -6,5 +6,5 @@
     "youtube_client_secrets_file": "client_secrets.json",
     "youtube_credentials_file": "youtube_credentials.json",
     "youtube_privacy_status": "unlisted",
-    "youtube_channel_id": ""
+    "youtube_playlist_id": ""
 }
