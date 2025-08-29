@@ -2,5 +2,9 @@
     "printer_ip": "192.168.1.123",
     "access_code": "11122233",
     "telegram_bot_token": "",
-    "telegram_channel_id": ""
+    "telegram_channel_id": "",
+    "youtube_client_secrets_file": "client_secrets.json",
+    "youtube_credentials_file": "youtube_credentials.json",
+    "youtube_privacy_status": "unlisted",
+    "youtube_playlist_id": ""
 }
